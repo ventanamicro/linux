@@ -6,17 +6,22 @@
 
 #define GENERATING_ASM_OFFSETS
 
+#include <linux/bitfield.h>
 #include <linux/kbuild.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/ftrace.h>
 #include <linux/suspend.h>
+#include <linux/riscv_sse.h>
 #include <asm/kvm_host.h>
 #include <asm/thread_info.h>
 #include <asm/ptrace.h>
 #include <asm/cpu_ops_sbi.h>
 #include <asm/stacktrace.h>
+#include <asm/sbi.h>
+#include <asm/sse.h>
 #include <asm/suspend.h>
+#include <asm/stacktrace.h>
 
 void asm_offsets(void);
 
@@ -505,5 +510,14 @@ void asm_offsets(void)
 	DEFINE(FREGS_A5,	    offsetof(struct ftrace_regs, a5));
 	DEFINE(FREGS_A6,	    offsetof(struct ftrace_regs, a6));
 	DEFINE(FREGS_A7,	    offsetof(struct ftrace_regs, a7));
+#endif
+#ifdef CONFIG_RISCV_SSE
+	OFFSET(SSE_REG_EVT_STACK, sse_registered_event, stack);
+	OFFSET(SSE_REG_EVT_SHADOW_STACK, sse_registered_event, shadow_stack);
+	OFFSET(SSE_REG_EVT_TMP, sse_registered_event, interrupted.a6);
+
+	DEFINE(SBI_EXT_SSE, SBI_EXT_SSE);
+	DEFINE(SBI_SSE_EVENT_COMPLETE, SBI_SSE_EVENT_COMPLETE);
+	DEFINE(NR_CPUS, NR_CPUS);
 #endif
 }

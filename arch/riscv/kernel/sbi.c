@@ -70,8 +70,6 @@ int sbi_err_map_linux_errno(int err)
 		return -EINVAL;
 	case SBI_ERR_INVALID_ADDRESS:
 		return -EFAULT;
-	case SBI_ERR_BUSY:
-		return -EBUSY;
 	case SBI_ERR_NOT_SUPPORTED:
 	case SBI_ERR_FAILURE:
 	default:
