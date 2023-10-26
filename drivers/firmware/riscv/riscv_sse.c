@@ -6,6 +6,8 @@
 #define pr_fmt(fmt) "sse: " fmt
 
 #include <linux/cpu.h>
+#include <acpi/ghes.h>
+#include <linux/acpi.h>
 #include <linux/cpuhotplug.h>
 #include <linux/hardirq.h>
 #include <linux/list.h>
@@ -650,3 +652,103 @@ remove_reboot:
 
 }
 core_initcall(sse_init);
+
+struct sse_event_data {
+	struct list_head head;
+	struct ghes *ghes;
+	u32 event_num;
+	struct sse_event *event;
+	sse_event_handler *cb;
+};
+
+static LIST_HEAD(sse_event_list);
+
+static int ghes_handler(u32 event_num, void *arg, struct pt_regs *regs)
+{
+	struct sse_event_data *data = (struct sse_event_data *)arg;
+	struct ghes *ghes = data->ghes;
+
+	if (ghes && data->cb)
+		return data->cb(event_num, ghes, regs);
+
+	return -EINVAL;
+}
+
+static struct sse_event_data *ghes_to_event_data(struct ghes *ghes)
+{
+	u32 event_num;
+	struct sse_event_data *ev_data;
+
+	event_num = ghes->generic->notify.vector;
+	list_for_each_entry(ev_data, &sse_event_list, head) {
+		if (ev_data->event_num == event_num)
+			return ev_data;
+	}
+
+	return NULL;
+}
+
+int sse_register_ghes(struct ghes *ghes, sse_event_handler *lo_cb,
+		      sse_event_handler *hi_cb)
+{
+	int err;
+	u32 event_num;
+	struct sse_event_data *ev_data;
+
+	if (!IS_ENABLED(CONFIG_ACPI_APEI_GHES))
+		return -EOPNOTSUPP;
+
+	if (!sse_available)
+		return -EOPNOTSUPP;
+
+	ev_data = kzalloc(sizeof(struct sse_event_data), GFP_KERNEL);
+	if (!ev_data)
+		return -ENOMEM;
+
+	INIT_LIST_HEAD(&ev_data->head);
+
+	event_num = ghes->generic->notify.vector;
+	if (event_num > SBI_SSE_EVENT_LOCAL_RAS_RSVD)
+		return -EINVAL;
+
+	ev_data->event_num = event_num;
+	ev_data->cb = lo_cb;
+	ev_data->ghes = ghes;
+
+	ev_data->event = sse_event_register(event_num, 0, ghes_handler,
+					    ev_data);
+
+	if (ev_data->event) {
+		if (sse_event_enable(ev_data->event) != 0)
+			pr_err("%s: Couldn't enable event %u\n", __func__, ev_data->event_num);
+		else
+			list_add(&ev_data->head, &sse_event_list);
+	}
+
+	return err;
+}
+
+int sse_unregister_ghes(struct ghes *ghes)
+{
+	struct sse_event_data *ev_data;
+
+	might_sleep();
+
+	if (!IS_ENABLED(CONFIG_ACPI_APEI_GHES))
+		return -EOPNOTSUPP;
+
+	if (!sse_available)
+		return -EOPNOTSUPP;
+
+	ev_data = ghes_to_event_data(ghes);
+	if (ev_data == NULL)
+		return -EBADF;
+
+	sse_event_unregister(ev_data->event);
+
+	list_del(&ev_data->head);
+
+	kfree(ev_data);
+
+	return 0;
+}
