@@ -18,6 +18,19 @@ void riscv_set_intc_hwnode_fn(struct fwnode_handle *(*fn)(void));
 
 struct fwnode_handle *riscv_get_intc_hwnode(void);
 
+struct riscv_iommu_mrif_notifier {
+	int (*notify)(void *data);
+	void *data;
+};
+
+struct riscv_iommu_vcpu_info {
+	u64 msi_addr_pattern;
+	u64 msi_addr_mask;
+	u64 gpa;
+	u64 hpa;
+	struct riscv_iommu_mrif_notifier *mrif_notifier;
+};
+
 #ifdef CONFIG_ACPI
 
 enum riscv_irqchip_type {
