@@ -36,6 +36,7 @@ enum sbi_ext_id {
 	SBI_EXT_STA = 0x535441,
 	SBI_EXT_NACL = 0x4E41434C,
 	SBI_EXT_DBTR = 0x44425452,
+	SBI_EXT_MPXY = 0x4D505859,
 
 	/* Experimentals extensions must lie within this range */
 	SBI_EXT_EXPERIMENTAL_START = 0x08000000,
@@ -430,6 +431,74 @@ struct sbi_dbtr_shmem_entry {
 	struct sbi_dbtr_id_msg id;
 };
 
+enum sbi_ext_mpxy_fid {
+	SBI_EXT_MPXY_SET_SHMEM,
+	SBI_EXT_MPXY_GET_CHANNEL_IDS,
+	SBI_EXT_MPXY_READ_ATTRS,
+	SBI_EXT_MPXY_WRITE_ATTRS,
+	SBI_EXT_MPXY_SEND_MSG_WITH_RESP,
+	SBI_EXT_MPXY_SEND_MSG_NO_RESP,
+	SBI_EXT_MPXY_GET_NOTIFICATION_EVENTS,
+};
+
+enum sbi_mpxy_attr_id {
+	/* Standard channel attributes managed by MPXY framework */
+	SBI_MPXY_ATTR_MSG_PROT_ID		= 0x00000000,
+	SBI_MPXY_ATTR_MSG_PROT_VER		= 0x00000001,
+	SBI_MPXY_ATTR_MSG_MAX_LEN		= 0x00000002,
+	SBI_MPXY_ATTR_MSG_SEND_TIMEOUT		= 0x00000003,
+	SBI_MPXY_ATTR_CHANNEL_CAPABILITY	= 0x00000004,
+	SBI_MPXY_ATTR_MSI_CONTROL		= 0x00000005,
+	SBI_MPXY_ATTR_MSI_ADDR_LO		= 0x00000006,
+	SBI_MPXY_ATTR_MSI_ADDR_HI		= 0x00000007,
+	SBI_MPXY_ATTR_MSI_DATA			= 0x00000008,
+	SBI_MPXY_ATTR_SSE_EVENT_ID		= 0x00000009,
+	SBI_MPXY_ATTR_EVENTS_STATE_CONTROL	= 0x0000000A,
+	SBI_MPXY_ATTR_STD_ATTR_MAX_IDX,
+	/* Message protocol specific attributes, managed by
+	 * message protocol driver */
+	SBI_MPXY_ATTR_MSGPROTO_ATTR_START	= 0x80000000,
+	SBI_MPXY_ATTR_MSGPROTO_ATTR_END		= 0xffffffff
+};
+
+enum sbi_mpxy_msgproto_id {
+	SBI_MPXY_MSGPROTO_RPMI_ID = 0x0,
+};
+
+struct sbi_mpxy_msi_info {
+	u32 msi_addr_lo;
+	u32 msi_addr_hi;
+	u32 msi_data;
+};
+
+/**
+ * Channel attributes.
+ * NOTE: The sequence of attribute fields are as per the
+ * defined sequence in the attribute table in spec(or as
+ * per the enum sbi_mpxy_attr_id).
+ */
+struct sbi_mpxy_channel_attrs {
+	/* Message protocol ID */
+	u32 msg_proto_id;
+	/* Message protocol Version */
+	u32 msg_proto_version;
+	/* Message protocol maximum message length */
+	u32 msg_max_len;
+	/* Message protocol message send timeout
+	 * in microseconds */
+	u32 msg_send_timeout;
+	/* Bit array for channel capabilities */
+	u32 capability;
+	/* MSI enable/disable control knob */
+	u32 msi_control;
+	/* Channel MSI info */
+	struct sbi_mpxy_msi_info msi_info;
+	/* SSE Event Id */
+	u32 sse_event_id;
+	/* Events State Control */
+	u32 eventsstate_ctrl;
+};
+
 /* SBI spec version fields */
 #define SBI_SPEC_VERSION_DEFAULT	0x1
 #define SBI_SPEC_VERSION_MAJOR_SHIFT	24
@@ -447,6 +516,11 @@ struct sbi_dbtr_shmem_entry {
 #define SBI_ERR_ALREADY_STARTED -7
 #define SBI_ERR_ALREADY_STOPPED -8
 #define SBI_ERR_NO_SHMEM	-9
+#define SBI_ERR_INVALID_STATE	-10
+#define SBI_ERR_BAD_RANGE	-11
+#define SBI_ERR_NOT_IMPLEMENTED	-12
+#define SBI_ERR_TIMEOUT		-13
+#define SBI_ERR_IO		-14
 
 extern unsigned long sbi_spec_version;
 struct sbiret {
@@ -568,4 +642,32 @@ static inline bool riscv_use_sbi_for_rfence(void) { return false; }
 static inline void sbi_ipi_init(void) { }
 #endif
 
+struct sbi_mpxy_shmem {
+	unsigned long size;
+	phys_addr_t phys_lo;
+	phys_addr_t phys_hi;
+};
+
+int sbi_mpxy_setup_shmem(unsigned long size, unsigned long phys_addr_lo,
+			 unsigned long phys_addr_hi, unsigned long flags);
+
+int sbi_mpxy_get_num_channels(u32 *channels_count);
+
+int sbi_mpxy_get_channel_ids(u32 *cbuf, unsigned long cbufsize);
+
+int sbi_mpxy_read_attrs(u32 channelid, u32 base_attrid,
+			u32 attr_count, void *attrbuf);
+
+int sbi_mpxy_write_attrs(u32 channelid, u32 base_attrid,
+			 u32 attr_count, void *attrbuf);
+
+int sbi_mpxy_send_message_withresp(u32 channelid, u32 msgid,
+				   void *tx, unsigned long tx_msglen,
+				   void *rx, unsigned long *rx_msglen);
+
+int sbi_mpxy_send_message_noresp(u32 channel, u32 msgid,
+				 void *tx, unsigned long tx_msglen);
+
+int sbi_mpxy_get_notifications(u32 channelid, void *rx,
+			       unsigned long *rx_msglen);
 #endif /* _ASM_RISCV_SBI_H */
