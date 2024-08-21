@@ -90,6 +90,7 @@ struct riscv_iommu_device {
 	unsigned int irqs[RISCV_IOMMU_INTR_COUNT];
 	unsigned int irqs_count;
 	unsigned int icvec;
+	bool msis_in_use;
 
 	/* hardware queues */
 	struct riscv_iommu_queue cmdq;
