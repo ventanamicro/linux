@@ -484,85 +484,81 @@ static int rpmi_clk_probe(struct platform_device *pdev)
 	rpmi_mbox_init_get_attribute(&msg, RPMI_MBOX_ATTR_SPEC_VERSION);
 	ret = rpmi_mbox_send_message(context->chan, &msg);
 	if (ret) {
-		dev_err_probe(dev, ret, "Failed to get spec version\n");
-		goto fail_free_channel;
+		mbox_free_channel(context->chan);
+		return dev_err_probe(dev, ret, "Failed to get spec version\n");
 	}
 	if (msg.attr.value < RPMI_MKVER(1, 0)) {
-		ret = dev_err_probe(dev, -EINVAL,
-				    "msg protocol version mismatch, expected 0x%x, found 0x%x\n",
-				    RPMI_MKVER(1, 0), msg.attr.value);
-		goto fail_free_channel;
+		mbox_free_channel(context->chan);
+		return dev_err_probe(dev, -EINVAL,
+				     "msg protocol version mismatch, expected 0x%x, found 0x%x\n",
+				     RPMI_MKVER(1, 0), msg.attr.value);
 	}
 
 	rpmi_mbox_init_get_attribute(&msg, RPMI_MBOX_ATTR_SERVICEGROUP_ID);
 	ret = rpmi_mbox_send_message(context->chan, &msg);
 	if (ret) {
-		dev_err_probe(dev, ret, "Failed to get service group ID\n");
-		goto fail_free_channel;
+		mbox_free_channel(context->chan);
+		return dev_err_probe(dev, ret, "Failed to get service group ID\n");
 	}
 	if (msg.attr.value != RPMI_SRVGRP_CLOCK) {
-		ret = dev_err_probe(dev, -EINVAL,
-				    "service group match failed, expected 0x%x, found 0x%x\n",
-				    RPMI_SRVGRP_CLOCK, msg.attr.value);
-		goto fail_free_channel;
+		mbox_free_channel(context->chan);
+		return dev_err_probe(dev, -EINVAL,
+				     "service group match failed, expected 0x%x, found 0x%x\n",
+				     RPMI_SRVGRP_CLOCK, msg.attr.value);
 	}
 
 	rpmi_mbox_init_get_attribute(&msg, RPMI_MBOX_ATTR_SERVICEGROUP_VERSION);
 	ret = rpmi_mbox_send_message(context->chan, &msg);
 	if (ret) {
-		dev_err_probe(dev, ret, "Failed to get service group version\n");
-		goto fail_free_channel;
+		mbox_free_channel(context->chan);
+		return dev_err_probe(dev, ret, "Failed to get service group version\n");
 	}
 	if (msg.attr.value < RPMI_MKVER(1, 0)) {
-		ret = dev_err_probe(dev, -EINVAL,
-				    "service group version failed, expected 0x%x, found 0x%x\n",
-				    RPMI_MKVER(1, 0), msg.attr.value);
-		goto fail_free_channel;
+		mbox_free_channel(context->chan);
+		return dev_err_probe(dev, -EINVAL,
+				     "service group version failed, expected 0x%x, found 0x%x\n",
+				     RPMI_MKVER(1, 0), msg.attr.value);
 	}
 
 	rpmi_mbox_init_get_attribute(&msg, RPMI_MBOX_ATTR_MAX_MSG_DATA_SIZE);
 	ret = rpmi_mbox_send_message(context->chan, &msg);
 	if (ret) {
-		dev_err_probe(dev, ret, "Failed to get max message data size\n");
-		goto fail_free_channel;
+		mbox_free_channel(context->chan);
+		return dev_err_probe(dev, ret, "Failed to get max message data size\n");
 	}
-	context->max_msg_data_size = msg.attr.value;
 
+	context->max_msg_data_size = msg.attr.value;
 	num_clocks = rpmi_clk_get_num_clocks(context);
-	if (num_clocks < 1) {
-		ret = dev_err_probe(dev, -ENODEV, "No clocks found\n");
-		goto fail_free_channel;
+	if (!num_clocks) {
+		mbox_free_channel(context->chan);
+		return dev_err_probe(dev, -ENODEV, "No clocks found\n");
 	}
 
 	clk_data = devm_kzalloc(dev, struct_size(clk_data, hws, num_clocks),
 				GFP_KERNEL);
 	if (!clk_data) {
-		ret = -ENOMEM;
-		goto fail_free_channel;
+		mbox_free_channel(context->chan);
+		return dev_err_probe(dev, -ENOMEM, "No memory for clock data\n");
 	}
 	clk_data->num = num_clocks;
 
 	for (i = 0; i < clk_data->num; i++) {
 		hw_ptr = rpmi_clk_enumerate(context, i);
 		if (IS_ERR(hw_ptr)) {
-			ret = dev_err_probe(dev, PTR_ERR(hw_ptr),
-					    "failed to register clk-%d\n", i);
-			goto fail_free_channel;
+			mbox_free_channel(context->chan);
+			return dev_err_probe(dev, PTR_ERR(hw_ptr),
+					     "failed to register clk-%d\n", i);
 		}
 		clk_data->hws[i] = hw_ptr;
 	}
 
 	ret = devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get, clk_data);
 	if (ret) {
-		dev_err_probe(dev, ret, "failed to register clock HW provider\n");
-		goto fail_free_channel;
+		mbox_free_channel(context->chan);
+		return dev_err_probe(dev, ret, "failed to register clock HW provider\n");
 	}
 
 	return 0;
-
-fail_free_channel:
-	mbox_free_channel(context->chan);
-	return ret;
 }
 
 static void rpmi_clk_remove(struct platform_device *pdev)
