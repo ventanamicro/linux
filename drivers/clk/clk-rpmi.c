@@ -24,7 +24,8 @@
 
 enum rpmi_clk_config {
 	RPMI_CLK_DISABLE = 0,
-	RPMI_CLK_ENABLE = 1
+	RPMI_CLK_ENABLE = 1,
+	RPMI_CLK_CONFIG_MAX_IDX
 };
 
 enum rpmi_clk_type {
@@ -40,6 +41,12 @@ struct rpmi_clk_context {
 	u32 max_msg_data_size;
 };
 
+/*
+ * rpmi_clk_rates represents the rates format
+ * as specified by the RPMI specification.
+ * No other format conversion(eg. linear_range) is
+ * required to avoid to and fro conversion.
+ */
 union rpmi_clk_rates {
 	u64 discrete[RPMI_CLK_DISCRETE_MAX_NUM_RATES];
 	struct {
@@ -136,18 +143,22 @@ struct rpmi_set_config_rx {
 
 static u32 rpmi_clk_get_num_clocks(struct rpmi_clk_context *context)
 {
-	struct rpmi_get_num_clocks_rx rx;
+	struct rpmi_get_num_clocks_rx rx, *resp;
 	struct rpmi_mbox_message msg;
 	int ret;
 
 	rpmi_mbox_init_send_with_response(&msg, RPMI_CLK_SRV_GET_NUM_CLOCKS,
 					  NULL, 0, &rx, sizeof(rx));
-	ret = rpmi_mbox_send_message(context->chan, &msg);
 
-	if (ret || rx.status)
+	ret = rpmi_mbox_send_message(context->chan, &msg);
+	if (ret)
 		return 0;
 
-	return le32_to_cpu(rx.num_clocks);
+	resp = rpmi_mbox_get_msg_response(&msg);
+	if (!resp || resp->status)
+		return 0;
+
+	return le32_to_cpu(resp->num_clocks);
 }
 
 static int rpmi_clk_get_attrs(u32 clkid, struct rpmi_clk *rpmi_clk)
@@ -155,25 +166,30 @@ static int rpmi_clk_get_attrs(u32 clkid, struct rpmi_clk *rpmi_clk)
 	struct rpmi_clk_context *context = rpmi_clk->context;
 	struct rpmi_mbox_message msg;
 	struct rpmi_get_attrs_tx tx;
-	struct rpmi_get_attrs_rx rx;
+	struct rpmi_get_attrs_rx rx, *resp;
 	u8 format;
 	int ret;
 
 	tx.clkid = cpu_to_le32(clkid);
 	rpmi_mbox_init_send_with_response(&msg, RPMI_CLK_SRV_GET_ATTRIBUTES,
 					  &tx, sizeof(tx), &rx, sizeof(rx));
+
 	ret = rpmi_mbox_send_message(context->chan, &msg);
 	if (ret)
 		return ret;
-	if (rx.status)
-		return rpmi_to_linux_error(le32_to_cpu(rx.status));
+
+	resp = rpmi_mbox_get_msg_response(&msg);
+	if (!resp)
+		return -EINVAL;
+	if (resp->status)
+		return rpmi_to_linux_error(le32_to_cpu(resp->status));
 
 	rpmi_clk->id = clkid;
-	rpmi_clk->num_rates = le32_to_cpu(rx.num_rates);
-	rpmi_clk->transition_latency = le32_to_cpu(rx.transition_latency);
-	strscpy(rpmi_clk->name, rx.name, RPMI_CLK_NAME_LEN);
+	rpmi_clk->num_rates = le32_to_cpu(resp->num_rates);
+	rpmi_clk->transition_latency = le32_to_cpu(resp->transition_latency);
+	strscpy(rpmi_clk->name, resp->name, RPMI_CLK_NAME_LEN);
 
-	format = le32_to_cpu(rx.flags) & 3U;
+	format = le32_to_cpu(resp->flags) & 3U;
 	if (format >= RPMI_CLK_TYPE_MAX_IDX)
 		return -EINVAL;
 
@@ -187,10 +203,10 @@ static int rpmi_clk_get_supported_rates(u32 clkid, struct rpmi_clk *rpmi_clk)
 	struct rpmi_clk_context *context = rpmi_clk->context;
 	struct rpmi_clk_rate_discrete *rate_discrete;
 	struct rpmi_clk_rate_linear *rate_linear;
-	struct rpmi_get_supp_rates_rx *rx __free(kfree) = NULL;
 	struct rpmi_get_supp_rates_tx tx;
+	struct rpmi_get_supp_rates_rx *resp;
 	struct rpmi_mbox_message msg;
-	size_t clk_rate_idx = 0;
+	size_t clk_rate_idx;
 	int ret, rateidx, j;
 
 	tx.clkid = cpu_to_le32(clkid);
@@ -200,24 +216,29 @@ static int rpmi_clk_get_supported_rates(u32 clkid, struct rpmi_clk *rpmi_clk)
 	 * Make sure we allocate rx buffer sufficient to be accommodate all
 	 * the rates sent in one RPMI message.
 	 */
-	rx = kzalloc(context->max_msg_data_size, GFP_KERNEL);
+	struct rpmi_get_supp_rates_rx *rx __free(kfree) = kzalloc(context->max_msg_data_size, GFP_KERNEL);
 	if (!rx)
 		return -ENOMEM;
 
 	rpmi_mbox_init_send_with_response(&msg, RPMI_CLK_SRV_GET_SUPPORTED_RATES,
 					  &tx, sizeof(tx), rx, context->max_msg_data_size);
+
 	ret = rpmi_mbox_send_message(context->chan, &msg);
 	if (ret)
 		return ret;
-	if (rx->status)
-		return rpmi_to_linux_error(le32_to_cpu(rx->status));
-	if (!le32_to_cpu(rx->returned))
+
+	resp = rpmi_mbox_get_msg_response(&msg);
+	if (!resp)
+		return -EINVAL;
+	if (resp->status)
+		return rpmi_to_linux_error(le32_to_cpu(resp->status));
+	if (!le32_to_cpu(resp->returned))
 		return -EINVAL;
 
 	if (rpmi_clk->type == RPMI_CLK_DISCRETE) {
-		rate_discrete = (struct rpmi_clk_rate_discrete *)rx->rates;
+		rate_discrete = (struct rpmi_clk_rate_discrete *)resp->rates;
 
-		for (rateidx = 0; rateidx < le32_to_cpu(rx->returned); rateidx++) {
+		for (rateidx = 0; rateidx < le32_to_cpu(resp->returned); rateidx++) {
 			rpmi_clk->rates->discrete[rateidx] =
 				rpmi_clkrate_u64(le32_to_cpu(rate_discrete[rateidx].hi),
 						 le32_to_cpu(rate_discrete[rateidx].lo));
@@ -227,24 +248,30 @@ static int rpmi_clk_get_supported_rates(u32 clkid, struct rpmi_clk *rpmi_clk)
 		 * Keep sending the request message until all
 		 * the rates are received.
 		 */
-		while (le32_to_cpu(rx->remaining)) {
-			clk_rate_idx += le32_to_cpu(rx->returned);
+		clk_rate_idx = 0;
+		while (le32_to_cpu(resp->remaining)) {
+			clk_rate_idx += le32_to_cpu(resp->returned);
 			tx.clk_rate_idx = cpu_to_le32(clk_rate_idx);
 
 			rpmi_mbox_init_send_with_response(&msg,
 							  RPMI_CLK_SRV_GET_SUPPORTED_RATES,
 							  &tx, sizeof(tx),
 							  rx, context->max_msg_data_size);
+
 			ret = rpmi_mbox_send_message(context->chan, &msg);
 			if (ret)
 				return ret;
-			if (rx->status)
-				return rpmi_to_linux_error(le32_to_cpu(rx->status));
-			if (!le32_to_cpu(rx->returned))
+
+			resp = rpmi_mbox_get_msg_response(&msg);
+			if (!resp)
+				return -EINVAL;
+			if (resp->status)
+				return rpmi_to_linux_error(le32_to_cpu(resp->status));
+			if (!le32_to_cpu(resp->returned))
 				return -EINVAL;
 
-			for (j = 0; j < le32_to_cpu(rx->returned); j++) {
-				if (rateidx >= clk_rate_idx + le32_to_cpu(rx->returned))
+			for (j = 0; j < le32_to_cpu(resp->returned); j++) {
+				if (rateidx >= clk_rate_idx + le32_to_cpu(resp->returned))
 					break;
 				rpmi_clk->rates->discrete[rateidx++] =
 					rpmi_clkrate_u64(le32_to_cpu(rate_discrete[j].hi),
@@ -252,7 +279,7 @@ static int rpmi_clk_get_supported_rates(u32 clkid, struct rpmi_clk *rpmi_clk)
 			}
 		}
 	} else if (rpmi_clk->type == RPMI_CLK_LINEAR) {
-		rate_linear = (struct rpmi_clk_rate_linear *)rx->rates;
+		rate_linear = (struct rpmi_clk_rate_linear *)resp->rates;
 
 		rpmi_clk->rates->linear.min = rpmi_clkrate_u64(le32_to_cpu(rate_linear->min_hi),
 							       le32_to_cpu(rate_linear->min_lo));
@@ -272,20 +299,25 @@ static unsigned long rpmi_clk_recalc_rate(struct clk_hw *hw,
 	struct rpmi_clk_context *context = rpmi_clk->context;
 	struct rpmi_mbox_message msg;
 	struct rpmi_get_rate_tx tx;
-	struct rpmi_get_rate_rx rx;
+	struct rpmi_get_rate_rx rx, *resp;
 	int ret;
 
 	tx.clkid = cpu_to_le32(rpmi_clk->id);
 
 	rpmi_mbox_init_send_with_response(&msg, RPMI_CLK_SRV_GET_RATE,
 					  &tx, sizeof(tx), &rx, sizeof(rx));
+
 	ret = rpmi_mbox_send_message(context->chan, &msg);
 	if (ret)
 		return ret;
-	if (rx.status)
-		return rpmi_to_linux_error(le32_to_cpu(rx.status));
 
-	return rpmi_clkrate_u64(le32_to_cpu(rx.hi), le32_to_cpu(rx.lo));
+	resp = rpmi_mbox_get_msg_response(&msg);
+	if (!resp)
+		return -EINVAL;
+	if (resp->status)
+		return rpmi_to_linux_error(le32_to_cpu(resp->status));
+
+	return rpmi_clkrate_u64(le32_to_cpu(resp->hi), le32_to_cpu(resp->lo));
 }
 
 static int rpmi_clk_determine_rate(struct clk_hw *hw,
@@ -329,7 +361,7 @@ static int rpmi_clk_set_rate(struct clk_hw *hw, unsigned long rate,
 	struct rpmi_clk_context *context = rpmi_clk->context;
 	struct rpmi_mbox_message msg;
 	struct rpmi_set_rate_tx tx;
-	struct rpmi_set_rate_rx rx;
+	struct rpmi_set_rate_rx rx, *resp;
 	int ret;
 
 	tx.clkid = cpu_to_le32(rpmi_clk->id);
@@ -338,11 +370,16 @@ static int rpmi_clk_set_rate(struct clk_hw *hw, unsigned long rate,
 
 	rpmi_mbox_init_send_with_response(&msg, RPMI_CLK_SRV_SET_RATE,
 					  &tx, sizeof(tx), &rx, sizeof(rx));
+
 	ret = rpmi_mbox_send_message(context->chan, &msg);
 	if (ret)
 		return ret;
-	if (rx.status)
-		return rpmi_to_linux_error(le32_to_cpu(rx.status));
+
+	resp = rpmi_mbox_get_msg_response(&msg);
+	if (!resp)
+		return -EINVAL;
+	if (resp->status)
+		return rpmi_to_linux_error(le32_to_cpu(resp->status));
 
 	return 0;
 }
@@ -353,7 +390,7 @@ static int rpmi_clk_enable(struct clk_hw *hw)
 	struct rpmi_clk_context *context = rpmi_clk->context;
 	struct rpmi_mbox_message msg;
 	struct rpmi_set_config_tx tx;
-	struct rpmi_set_config_rx rx;
+	struct rpmi_set_config_rx rx, *resp;
 	int ret;
 
 	tx.config = cpu_to_le32(RPMI_CLK_ENABLE);
@@ -361,11 +398,16 @@ static int rpmi_clk_enable(struct clk_hw *hw)
 
 	rpmi_mbox_init_send_with_response(&msg, RPMI_CLK_SRV_SET_CONFIG,
 					  &tx, sizeof(tx), &rx, sizeof(rx));
+
 	ret = rpmi_mbox_send_message(context->chan, &msg);
 	if (ret)
 		return ret;
-	if (rx.status)
-		return rpmi_to_linux_error(le32_to_cpu(rx.status));
+
+	resp = rpmi_mbox_get_msg_response(&msg);
+	if (!resp)
+		return -EINVAL;
+	if (resp->status)
+		return rpmi_to_linux_error(le32_to_cpu(resp->status));
 
 	return 0;
 }
@@ -377,16 +419,14 @@ static void rpmi_clk_disable(struct clk_hw *hw)
 	struct rpmi_mbox_message msg;
 	struct rpmi_set_config_tx tx;
 	struct rpmi_set_config_rx rx;
-	int ret;
 
 	tx.config = cpu_to_le32(RPMI_CLK_DISABLE);
 	tx.clkid = cpu_to_le32(rpmi_clk->id);
 
 	rpmi_mbox_init_send_with_response(&msg, RPMI_CLK_SRV_SET_CONFIG,
 					  &tx, sizeof(tx), &rx, sizeof(rx));
-	ret = rpmi_mbox_send_message(context->chan, &msg);
-	if (ret || rx.status)
-		pr_err("Failed to disable clk-%u\n", rpmi_clk->id);
+
+	rpmi_mbox_send_message(context->chan, &msg);
 }
 
 static const struct clk_ops rpmi_clk_ops = {
@@ -456,6 +496,13 @@ static struct clk_hw *rpmi_clk_enumerate(struct rpmi_clk_context *context, u32 c
 	return clk_hw;
 }
 
+static void rpmi_clk_mbox_chan_release(void *data)
+{
+	struct mbox_chan *chan = data;
+
+	mbox_free_channel(chan);
+}
+
 static int rpmi_clk_probe(struct platform_device *pdev)
 {
 	int ret;
@@ -482,14 +529,16 @@ static int rpmi_clk_probe(struct platform_device *pdev)
 	if (IS_ERR(context->chan))
 		return PTR_ERR(context->chan);
 
+	ret = devm_add_action_or_reset(dev, rpmi_clk_mbox_chan_release, context->chan);
+	if (ret)
+		return dev_err_probe(dev, ret, "Failed to add rpmi mbox channel cleanup\n");
+
 	rpmi_mbox_init_get_attribute(&msg, RPMI_MBOX_ATTR_SPEC_VERSION);
 	ret = rpmi_mbox_send_message(context->chan, &msg);
 	if (ret) {
-		mbox_free_channel(context->chan);
 		return dev_err_probe(dev, ret, "Failed to get spec version\n");
 	}
 	if (msg.attr.value < RPMI_MKVER(1, 0)) {
-		mbox_free_channel(context->chan);
 		return dev_err_probe(dev, -EINVAL,
 				     "msg protocol version mismatch, expected 0x%x, found 0x%x\n",
 				     RPMI_MKVER(1, 0), msg.attr.value);
@@ -498,11 +547,9 @@ static int rpmi_clk_probe(struct platform_device *pdev)
 	rpmi_mbox_init_get_attribute(&msg, RPMI_MBOX_ATTR_SERVICEGROUP_ID);
 	ret = rpmi_mbox_send_message(context->chan, &msg);
 	if (ret) {
-		mbox_free_channel(context->chan);
 		return dev_err_probe(dev, ret, "Failed to get service group ID\n");
 	}
 	if (msg.attr.value != RPMI_SRVGRP_CLOCK) {
-		mbox_free_channel(context->chan);
 		return dev_err_probe(dev, -EINVAL,
 				     "service group match failed, expected 0x%x, found 0x%x\n",
 				     RPMI_SRVGRP_CLOCK, msg.attr.value);
@@ -511,11 +558,9 @@ static int rpmi_clk_probe(struct platform_device *pdev)
 	rpmi_mbox_init_get_attribute(&msg, RPMI_MBOX_ATTR_SERVICEGROUP_VERSION);
 	ret = rpmi_mbox_send_message(context->chan, &msg);
 	if (ret) {
-		mbox_free_channel(context->chan);
 		return dev_err_probe(dev, ret, "Failed to get service group version\n");
 	}
 	if (msg.attr.value < RPMI_MKVER(1, 0)) {
-		mbox_free_channel(context->chan);
 		return dev_err_probe(dev, -EINVAL,
 				     "service group version failed, expected 0x%x, found 0x%x\n",
 				     RPMI_MKVER(1, 0), msg.attr.value);
@@ -524,21 +569,18 @@ static int rpmi_clk_probe(struct platform_device *pdev)
 	rpmi_mbox_init_get_attribute(&msg, RPMI_MBOX_ATTR_MAX_MSG_DATA_SIZE);
 	ret = rpmi_mbox_send_message(context->chan, &msg);
 	if (ret) {
-		mbox_free_channel(context->chan);
 		return dev_err_probe(dev, ret, "Failed to get max message data size\n");
 	}
 
 	context->max_msg_data_size = msg.attr.value;
 	num_clocks = rpmi_clk_get_num_clocks(context);
 	if (!num_clocks) {
-		mbox_free_channel(context->chan);
 		return dev_err_probe(dev, -ENODEV, "No clocks found\n");
 	}
 
 	clk_data = devm_kzalloc(dev, struct_size(clk_data, hws, num_clocks),
 				GFP_KERNEL);
 	if (!clk_data) {
-		mbox_free_channel(context->chan);
 		return dev_err_probe(dev, -ENOMEM, "No memory for clock data\n");
 	}
 	clk_data->num = num_clocks;
@@ -546,7 +588,6 @@ static int rpmi_clk_probe(struct platform_device *pdev)
 	for (i = 0; i < clk_data->num; i++) {
 		hw_ptr = rpmi_clk_enumerate(context, i);
 		if (IS_ERR(hw_ptr)) {
-			mbox_free_channel(context->chan);
 			return dev_err_probe(dev, PTR_ERR(hw_ptr),
 					     "failed to register clk-%d\n", i);
 		}
@@ -555,18 +596,10 @@ static int rpmi_clk_probe(struct platform_device *pdev)
 
 	ret = devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get, clk_data);
 	if (ret) {
-		mbox_free_channel(context->chan);
 		return dev_err_probe(dev, ret, "failed to register clock HW provider\n");
 	}
 
 	return 0;
-}
-
-static void rpmi_clk_remove(struct platform_device *pdev)
-{
-	struct rpmi_clk_context *context = platform_get_drvdata(pdev);
-
-	mbox_free_channel(context->chan);
 }
 
 static const struct of_device_id rpmi_clk_of_match[] = {
@@ -581,7 +614,6 @@ static struct platform_driver rpmi_clk_driver = {
 		.of_match_table = rpmi_clk_of_match,
 	},
 	.probe = rpmi_clk_probe,
-	.remove = rpmi_clk_remove,
 };
 module_platform_driver(rpmi_clk_driver);
 
