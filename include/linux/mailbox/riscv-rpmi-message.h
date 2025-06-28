@@ -219,6 +219,11 @@ static inline void rpmi_mbox_init_send_without_response(struct rpmi_mbox_message
 	msg->error = 0;
 }
 
+static inline void *rpmi_mbox_get_msg_response(struct rpmi_mbox_message *msg)
+{
+        return msg ? msg->data.response : NULL; 
+}
+
 static inline int rpmi_mbox_send_message(struct mbox_chan *chan,
 					 struct rpmi_mbox_message *msg)
 {
