@@ -8,6 +8,8 @@
 
 #include <linux/device.h>
 #include <linux/io.h>
+#include <linux/limits.h>
+#include <linux/list.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/types.h>
@@ -62,6 +64,12 @@ enum rvtrace_component_type {
 enum rvtrace_component_impid {
 	RVTRACE_COMPONENT_IMPID_UNKNOWN,
 	RVTRACE_COMPONENT_IMPID_MAX
+};
+
+/* Supported usage modes for RISC-V trace components */
+enum rvtrace_component_mode {
+	RVTRACE_COMPONENT_MODE_PERF,
+	RVTRACE_COMPONENT_MODE_MAX
 };
 
 /**
@@ -222,22 +230,51 @@ extern const struct rvtrace_component_id *rvtrace_match_id(struct rvtrace_compon
 							   const struct rvtrace_component_id *ids);
 extern struct rvtrace_component *rvtrace_find_by_fwnode(struct fwnode_handle *);
 
+extern int rvtrace_walk_output_components(struct rvtrace_component *comp, void *priv,
+					  int (*fn)(struct rvtrace_component *comp, bool *stop,
+						    struct rvtrace_connection *stop_conn,
+						    void *priv));
 extern struct rvtrace_component *rvtrace_cpu_source(unsigned int cpu);
 
 extern struct rvtrace_component *rvtrace_register_component(struct rvtrace_platform_data *pdata);
 extern void rvtrace_unregister_component(struct rvtrace_component *comp);
 
 /**
+ * struct rvtrace_path - Representation of a RISC-V trace path from source to sink
+ * @comp_list: List of RISC-V trace components in the path
+ * @mode:      Usage mode for RISC-V trace components
+ * @trace_id:  ID of the trace source (typically hart id)
+ */
+struct rvtrace_path {
+	struct list_head		comp_list;
+	enum rvtrace_component_mode	mode;
+	u32				trace_id;
+#define RVTRACE_INVALID_TRACE_ID	0
+};
+
+extern struct rvtrace_path *rvtrace_create_path(struct rvtrace_component *source,
+						struct rvtrace_component *sink,
+						enum rvtrace_component_mode mode);
+extern void rvtrace_destroy_path(struct rvtrace_path *path);
+
+/**
  * struct rvtrace_driver - Representation of a RISC-V trace driver
  * id_table: Table to match components handled by the driver
- * probe:    Driver probe() function
- * remove:   Driver remove() function
+ * probe:        Driver probe() function
+ * remove:       Driver remove() function
+ * get_trace_id: Get/allocate a trace ID
+ * put_trace_id: Put/free a trace ID
  * driver:   Device driver instance
  */
 struct rvtrace_driver {
 	const struct rvtrace_component_id *id_table;
 	int			(*probe)(struct rvtrace_component *comp);
 	void			(*remove)(struct rvtrace_component *comp);
+	int			(*get_trace_id)(struct rvtrace_component *comp,
+						enum rvtrace_component_mode mode);
+	void			(*put_trace_id)(struct rvtrace_component *comp,
+						enum rvtrace_component_mode mode,
+						u32 trace_id);
 	struct device_driver	driver;
 };
 
