@@ -194,12 +194,81 @@ static void riscv_iommu_ir_msitbl_disable(struct riscv_iommu_domain *domain)
 	riscv_iommu_ir_msitbl_update(domain, &domain->msiptp);
 }
 
+static void riscv_iommu_ir_set_pte(struct riscv_iommu_msipte *pte, u64 addr)
+{
+	pte->pte = FIELD_PREP(RISCV_IOMMU_MSIPTE_M, 3) |
+		   riscv_iommu_phys_to_ppn(addr) |
+		   FIELD_PREP(RISCV_IOMMU_MSIPTE_V, 1);
+	pte->mrif_info = 0;
+}
+
+static void riscv_iommu_ir_clear_pte(struct riscv_iommu_msipte *pte)
+{
+	pte->pte = 0;
+	pte->mrif_info = 0;
+}
+
+static size_t riscv_iommu_ir_get_msipte_idx_from_irq(struct irq_data *data, phys_addr_t *addr)
+{
+	struct riscv_iommu_domain *domain = data->domain->host_data;
+	struct msi_msg msg;
+
+	BUG_ON(irq_chip_compose_msi_msg(data, &msg));
+
+	*addr = ((phys_addr_t)msg.address_hi << 32) | msg.address_lo;
+
+	return riscv_iommu_ir_get_msipte_idx(domain, *addr);
+}
+
+static int riscv_iommu_ir_irq_set_affinity(struct irq_data *data,
+					   const struct cpumask *dest, bool force)
+{
+	struct riscv_iommu_domain *domain = data->domain->host_data;
+	struct riscv_iommu_msipte *pte;
+	phys_addr_t old_addr, new_addr;
+	size_t old_idx, new_idx;
+	int ret;
+
+	old_idx = riscv_iommu_ir_get_msipte_idx_from_irq(data, &old_addr);
+
+	ret = irq_chip_set_affinity_parent(data, dest, force);
+	if (ret < 0)
+		return ret;
+
+	new_idx = riscv_iommu_ir_get_msipte_idx_from_irq(data, &new_addr);
+
+	if (new_idx == old_idx)
+		return ret;
+
+	if (refcount_dec_and_lock(&domain->msi_pte_counts[old_idx], &domain->msi_lock)) {
+		pte = &domain->msi_root[old_idx];
+		riscv_iommu_ir_clear_pte(pte);
+		riscv_iommu_ir_msitbl_inval(domain, pte);
+		spin_unlock(&domain->msi_lock);
+	}
+
+	if (!refcount_inc_not_zero(&domain->msi_pte_counts[new_idx])) {
+		spin_lock(&domain->msi_lock);
+		if (refcount_read(&domain->msi_pte_counts[new_idx]) == 0) {
+			pte = &domain->msi_root[new_idx];
+			riscv_iommu_ir_set_pte(pte, new_addr);
+			riscv_iommu_ir_msitbl_inval(domain, pte);
+			refcount_set(&domain->msi_pte_counts[new_idx], 1);
+		} else {
+			refcount_inc(&domain->msi_pte_counts[new_idx]);
+		}
+		spin_unlock(&domain->msi_lock);
+	}
+
+	return ret;
+}
+
 static struct irq_chip riscv_iommu_ir_irq_chip = {
 	.name			= "IOMMU-IR",
 	.irq_ack		= irq_chip_ack_parent,
 	.irq_mask		= irq_chip_mask_parent,
 	.irq_unmask		= irq_chip_unmask_parent,
-	.irq_set_affinity	= irq_chip_set_affinity_parent,
+	.irq_set_affinity	= riscv_iommu_ir_irq_set_affinity,
 };
 
 static int riscv_iommu_ir_irq_domain_alloc_irqs(struct irq_domain *irqdomain,
@@ -208,6 +277,8 @@ static int riscv_iommu_ir_irq_domain_alloc_irqs(struct irq_domain *irqdomain,
 {
 	struct riscv_iommu_domain *domain = irqdomain->host_data;
 	struct irq_data *data;
+	phys_addr_t addr;
+	size_t idx;
 	int i, ret;
 
 	ret = irq_domain_alloc_irqs_parent(irqdomain, irq_base, nr_irqs, arg);
@@ -217,6 +288,9 @@ static int riscv_iommu_ir_irq_domain_alloc_irqs(struct irq_domain *irqdomain,
 	for (i = 0; i < nr_irqs; i++) {
 		data = irq_domain_get_irq_data(irqdomain, irq_base + i);
 		data->chip = &riscv_iommu_ir_irq_chip;
+		idx = riscv_iommu_ir_get_msipte_idx_from_irq(data, &addr);
+		riscv_iommu_ir_set_pte(&domain->msi_root[idx], addr);
+		refcount_set(&domain->msi_pte_counts[idx], 1);
 	}
 
 	riscv_iommu_ir_msitbl_enable(domain);
@@ -229,8 +303,20 @@ static void riscv_iommu_ir_irq_domain_free_irqs(struct irq_domain *irqdomain,
 						unsigned int nr_irqs)
 {
 	struct riscv_iommu_domain *domain = irqdomain->host_data;
+	struct irq_data *data;
+	phys_addr_t addr;
+	size_t idx;
+	int i;
 
 	riscv_iommu_ir_msitbl_disable(domain);
+
+	for (i = 0; i < nr_irqs; i++) {
+		data = irq_domain_get_irq_data(irqdomain, irq_base + i);
+		idx = riscv_iommu_ir_get_msipte_idx_from_irq(data, &addr);
+		riscv_iommu_ir_clear_pte(&domain->msi_root[idx]);
+		refcount_set(&domain->msi_pte_counts[idx], 0);
+	}
+
 	irq_domain_free_irqs_parent(irqdomain, irq_base, nr_irqs);
 }
 
@@ -304,15 +390,19 @@ int riscv_iommu_ir_irq_domain_create(struct riscv_iommu_domain *domain,
 	if (!domain->msi_root)
 		goto nomem;
 
+	domain->msi_pte_counts = kzalloc(nr_ptes * sizeof(refcount_t), GFP_KERNEL_ACCOUNT);
+	if (!domain->msi_pte_counts)
+		goto free_msi_root;
+
 	fwname = kasprintf(GFP_KERNEL, "IOMMU-IR-%s-%u", dev_name(dev), domain->pscid);
 	if (!fwname)
-		goto free_msi_root;
+		goto free_msi_pte_counts;
 
 	fn = irq_domain_alloc_named_fwnode(fwname);
 	kfree(fwname);
 	if (!fn) {
 		dev_err(iommu->dev, "Couldn't allocate fwnode\n");
-		goto free_msi_root;
+		goto free_msi_pte_counts;
 	}
 
 	irqdomain = irq_domain_create_hierarchy(irqparent, 0, 0, fn,
@@ -323,7 +413,16 @@ int riscv_iommu_ir_irq_domain_create(struct riscv_iommu_domain *domain,
 		goto free_fwnode;
 	}
 
-	irqdomain->flags |= IRQ_DOMAIN_FLAG_MSI_PARENT;
+	/*
+	 * NOTE: The RISC-V IOMMU doesn't actually support isolated MSI because
+	 * there is no MSI message validation (see the comment above
+	 * msi_device_has_isolated_msi()). However, we claim isolated MSI here
+	 * because applying the IOMMU ensures MSI messages may only be delivered
+	 * to the mapped MSI addresses. This allows MSIs to be isolated to
+	 * particular harts/vcpus where the unvalidated MSI messages can be
+	 * tolerated.
+	 */
+	irqdomain->flags |= IRQ_DOMAIN_FLAG_MSI_PARENT | IRQ_DOMAIN_FLAG_ISOLATED_MSI;
 	irqdomain->msi_parent_ops = &riscv_iommu_ir_msi_parent_ops;
 	irq_domain_update_bus_token(irqdomain, DOMAIN_BUS_MSI_REMAP);
 
@@ -334,6 +433,8 @@ int riscv_iommu_ir_irq_domain_create(struct riscv_iommu_domain *domain,
 
 free_fwnode:
 	irq_domain_free_fwnode(fn);
+free_msi_pte_counts:
+	kfree(domain->msi_pte_counts);
 free_msi_root:
 	iommu_free_pages(domain->msi_root);
 nomem:
