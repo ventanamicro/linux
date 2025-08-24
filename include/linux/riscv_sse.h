@@ -52,5 +52,15 @@ static inline int sse_event_enable(struct sse_event *sse_evt)
 }
 
 static inline void sse_event_disable(struct sse_event *sse_evt) {}
+
+static inline int sse_event_enable_local(struct sse_event *sse_evt)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int sse_event_disable_local(struct sse_event *sse_evt)
+{
+	return -EOPNOTSUPP;
+}
 #endif
 #endif /* __LINUX_RISCV_SSE_H */
